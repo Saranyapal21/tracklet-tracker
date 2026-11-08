@@ -35,9 +35,15 @@ outperforming the rule-based baseline.
     uv sync
     ```
 
-6. Once the project is properly setup and installed, run the pipeline for grid-determination as a module
+6. Once the project is properly setup and installed, run the pipeline for tracklet-tracker as a module. This will process the data, prepare features
+   from them, train the XGBoost based model and perform inference on test data. It will run the baseline rule-based pipeline as well. So, in the end,    both the perforrmance metrices will be printed and we will be able to easily compare them
     ```bash
     python -m tracklet_tracker
+    ```
+
+7. [Optional] If you want to save the test set predictions, and their status as well, run the below command:
+   ```bash
+    python -m tracklet_tracker.inference
     ```
 
 
