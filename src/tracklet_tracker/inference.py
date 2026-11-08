@@ -95,7 +95,7 @@ if __name__ == "__main__":
     model = build_model(X_train, y_train, X_val, y_val, project_root / "models")
     y_proba = get_model_probabilities(X_test, model)
     
-    output_file = project_root / "data" / "outputs" / "test_inference_predictions.json"
+    output_file = project_root / "outputs" / "test_inference_predictions.jsonl"
     save_test_predictions(
         X_test=full_test, 
         y_test=y_test, 
