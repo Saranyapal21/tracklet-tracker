@@ -10,6 +10,7 @@ from tracklet_tracker.evaluate import (
     compute_evaluation_metrics,
     print_feature_importance,
 )
+from tracklet_tracker.rule_based_scorer import get_baseline_probabilities
 
 
 def build_complete_dataset(base_path: str, limit: int):
@@ -76,8 +77,17 @@ def load_saved_model(save_path: str) -> xgb.XGBClassifier:
 
 
 def run_evaluation(
-    X: pd.DataFrame, y: pd.Series, model: xgb.XGBClassifier, threshold=0.9
+    X: pd.DataFrame, y: pd.Series, model: xgb.XGBClassifier, threshold=0.9, 
+    baseline=False, y_proba_baseline: float = None
 ):
+
+    if baseline:
+        compute_confusion_matrix(y, y_proba_baseline, threshold)
+        compute_evaluation_metrics(y, y_proba_baseline, threshold)
+
+        return
+
+    
     y_proba = get_model_probabilities(X, model)
 
     compute_confusion_matrix(y, y_proba, threshold)
@@ -96,6 +106,7 @@ if __name__ == "__main__":
         build_train_test_eval_set(train_path, test_path, val_path)
     )
 
+    print("Printing the final data shapes of train, test and validation accordingly")
     print(X_train.shape)
     print(X_test.shape)
     print(X_val.shape)
@@ -115,6 +126,13 @@ if __name__ == "__main__":
     #   Evaluate on test data
     print("Test Data performance:")
     run_evaluation(X_test, y_test, model, 0.9)
+
+    print("\n\n\n")
+
+    #   Evaluate baseline on test data
+    print("Test data baseline performance:")
+    y_baseline_proba = get_baseline_probabilities(X_test)
+    run_evaluation(X_test, y_test, None, 0.9, True, y_baseline_proba)
 
     #   Print Feature Importance
     print_feature_importance(model, X_train)

@@ -8,8 +8,10 @@ def process_sql_query(query: str):
 
 
 def deduplicating_df(df: pd.DataFrame, subset: str) -> pd.DataFrame:
+    is_exact_duplicate = df.astype(str).duplicated()
+    df = df[~is_exact_duplicate]
     df = df.drop_duplicates(subset=[subset], keep=False)
-
+    
     return df.reset_index(drop=True)
 
 
