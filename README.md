@@ -65,7 +65,7 @@ Total no. of rows (test data points): 3,870
 **Confusion Matrix (Threshold = 0.9):**
 
 **NOTE**: Incorrectly joining two different aircrafts is heavily penalized and not correct, whereas leaving a trajectory case unresolved 
-(predicting null) is completely acceptable. To satisfy this cause, we have set the threshold to a higher value of 0.9
+(predicting null) is completely acceptable. So, we need to reduce the number of False Positives. To satisfy this cause, we have set the threshold to a higher value of 0.9
 
 | Metric | Baseline | Data-Driven |
 |---|---:|---:|
