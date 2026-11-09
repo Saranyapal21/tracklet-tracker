@@ -120,14 +120,18 @@ def prepare_features_and_labels(
 
     # Attach ground-truth labels during training/evaluation.
     truth_df = labels_df[["tracklet_id", "successor_tracklet_id"]].copy()
+
+    # Ignore tracklets that have no known successor
+    truth_df = truth_df.dropna(subset=["successor_tracklet_id"])
     truth_df = truth_df.rename(
         columns={
             "tracklet_id": "A_tracklet_id",
             "successor_tracklet_id": "B_tracklet_id",
         }
     )
-    
     truth_df["target"] = 1
+
+
     final_dataset = pd.merge(
         pairs,
         truth_df,

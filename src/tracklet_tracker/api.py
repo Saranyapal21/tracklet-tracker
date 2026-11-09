@@ -1,17 +1,24 @@
-
+import json
 import logging
 import os
 
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+import pandas as pd
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
 from tracklet_tracker.schemas import (
-    AssociationRequest,
+    APIModel,
+    PositionReport,
+    SupportingRecord,
+    LabelRecord,
     AssociationResponse,
     HealthResponse,
 )
@@ -24,7 +31,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Project root: tracklet-tracker/
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 MODEL_PATH = Path(
@@ -35,14 +41,19 @@ MODEL_PATH = Path(
 )
 
 
-# Load the model only once when the application starts.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
     app.state.model = None
 
     try:
+        if not MODEL_PATH.is_file():
+            raise FileNotFoundError(
+                f"Model artifact not found: {MODEL_PATH}"
+            )
+
         app.state.model = load_saved_model(MODEL_PATH)
+
         logger.info("Model loaded successfully: %s", MODEL_PATH)
 
     except Exception:
@@ -61,7 +72,6 @@ app = FastAPI(
 )
 
 
-# Consistent validation error response.
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     request: Request,
@@ -79,7 +89,6 @@ async def validation_exception_handler(
     )
 
 
-# Consistent HTTP error response.
 @app.exception_handler(HTTPException)
 async def http_exception_handler(
     request: Request,
@@ -98,24 +107,91 @@ async def http_exception_handler(
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": error},
+        headers=exc.headers,
     )
 
 
-# ---------------------------------------------------------
-# GET /health
-# ---------------------------------------------------------
+def parse_jsonl(
+    content: bytes,
+    record_schema: type[APIModel],
+    file_name: str,
+) -> pd.DataFrame:
 
-@app.get("/health", response_model=HealthResponse)
+    try:
+        text = content.decode("utf-8")
+
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_encoding",
+                "message": f"{file_name} must use UTF-8 encoding.",
+            },
+        )
+
+        records = []
+
+    try:
+        # First, try standard JSONL: one JSON object per line.
+        try:
+            records = [
+                json.loads(line)
+                for line in text.splitlines()
+                if line.strip()
+            ]
+
+        except json.JSONDecodeError:
+            # Fallback: standard JSON array or a single JSON object.
+            parsed = json.loads(text)
+
+            if isinstance(parsed, list):
+                records = parsed
+            elif isinstance(parsed, dict):
+                records = [parsed]
+            else:
+                raise ValueError("Expected a JSON object or array.")
+
+        validated_records = [
+            record_schema.model_validate(record).model_dump(mode="python")
+            for record in records
+        ]
+
+    except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_input",
+                "message": f"Invalid data in {file_name}.",
+                "details": str(exc),
+            },
+        )
+
+    if not validated_records:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "empty_file",
+                "message": f"{file_name} does not contain any valid records.",
+            },
+        )
+
+    return pd.DataFrame(validated_records)
+
+
+@app.get(
+    "/health",
+    response_model=HealthResponse,
+)
 def health(request: Request):
 
     model = request.app.state.model
 
-    if model is None or not MODEL_PATH.is_file():
+    if model is None:
         raise HTTPException(
             status_code=503,
             detail={
                 "code": "model_unavailable",
-                "message": "The required model artifact is unavailable.",
+                "message": "The model is not loaded. Inference is unavailable.",
             },
         )
 
@@ -125,17 +201,16 @@ def health(request: Request):
     }
 
 
-# ---------------------------------------------------------
-# POST /tracklets/associate
-# ---------------------------------------------------------
-
 @app.post(
     "/tracklets/associate",
     response_model=AssociationResponse,
 )
-def associate_tracklets(
-    payload: AssociationRequest,
+async def associate_tracklets(
     request: Request,
+    observations_file: UploadFile = File(...),
+    supporting_file: UploadFile = File(...),
+    labels_file: UploadFile | None = File(None),
+    threshold: float = Form(default=0.90, ge=0.0, le=1.0),
 ):
 
     model = request.app.state.model
@@ -149,26 +224,47 @@ def associate_tracklets(
             },
         )
 
+    # Parse and validate the mandatory files.
+    observations_df = parse_jsonl(
+        await observations_file.read(),
+        PositionReport,
+        observations_file.filename or "observations.jsonl",
+    )
+
+    supporting_df = parse_jsonl(
+        await supporting_file.read(),
+        SupportingRecord,
+        supporting_file.filename or "supporting.jsonl",
+    )
+
+    # Labels are optional and used only for evaluation.
+    labels_df = None
+
+    if labels_file is not None:
+        labels_df = parse_jsonl(
+            await labels_file.read(),
+            LabelRecord,
+            labels_file.filename or "labels.jsonl",
+        )
+
     try:
-        results = run_association_inference(
-            position_reports=[
-                report.model_dump()
-                for report in payload.position_reports
-            ],
-            supporting_records=[
-                record.model_dump()
-                for record in payload.supporting_records
-            ],
+
+        results = await run_in_threadpool(
+            run_association_inference,
+            observations_df=observations_df,
+            supporting_df=supporting_df,
             model=model,
-            threshold=payload.threshold,
+            threshold=threshold,
+            labels_df=labels_df,
         )
 
         return AssociationResponse(
-            threshold=payload.threshold,
+            threshold=threshold,
             **results,
         )
 
     except ValueError as exc:
+
         raise HTTPException(
             status_code=422,
             detail={
@@ -178,6 +274,7 @@ def associate_tracklets(
         )
 
     except Exception:
+
         logger.exception("Tracklet association inference failed.")
 
         raise HTTPException(
@@ -188,3 +285,4 @@ def associate_tracklets(
             },
         )
 
+    

@@ -1,29 +1,15 @@
-
 import json
-from io import BytesIO
-from pathlib import Path
+import os
 
 import pandas as pd
+import requests
 import streamlit as st
 
-from tracklet_tracker.inference import run_association_inference
-from tracklet_tracker.helper_functions import load_saved_model
 
-
-# =========================================================
-# Configuration
-# =========================================================
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-
-MODEL_PATH = PROJECT_ROOT / "models" / "xgb_model.json"
-
-REQUIRED_FILES = {
-    "observations.jsonl",
-    "supporting.jsonl",
-}
-
-OPTIONAL_FILE = "labels.jsonl"
+API_URL = os.getenv(
+    "TRACKLET_API_URL",
+    "http://127.0.0.1:8000",
+).rstrip("/")
 
 
 st.set_page_config(
@@ -32,471 +18,372 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("✈️ Tracklet Tracker")
 
-st.caption(
-    "Aircraft tracklet association using rule-based "
-    "and machine learning models."
+def records_to_jsonl(records: list[dict]) -> str:
+    return "\n".join(
+        json.dumps(record, ensure_ascii=False)
+        for record in records
+    )
+
+
+def display_associations(records: list[dict], score_label: str):
+
+    # Tracklet-level summary
+    display_df = pd.DataFrame(
+        [
+            {
+                "Tracklet ID": record["tracklet_id"],
+                "Status": record["status"],
+                "Accepted Successor": record["accepted_successor_id"],
+                "Number of Candidates": len(record["ranked_candidates"]),
+            }
+            for record in records
+        ]
+    )
+
+    st.subheader("Tracklet Associations")
+
+    st.dataframe(
+        display_df,
+        width='stretch',
+        hide_index=True,
+    )
+
+    # Candidate-level scores
+    candidate_rows = []
+
+    for record in records:
+
+        for rank, candidate in enumerate(
+            record["ranked_candidates"], start=1
+        ):
+
+            measurements = candidate["supporting_measurements"]
+
+            candidate_rows.append(
+                {
+                    "Tracklet ID": record["tracklet_id"],
+                    "Rank": rank,
+                    "Candidate Successor": candidate["successor_tracklet_id"],
+                    score_label: candidate["score"],
+                    "Decision": (
+                        "Accepted"
+                        if candidate["successor_tracklet_id"]
+                        == record["accepted_successor_id"]
+                        else "Not selected"
+                    ),
+                    "Gap Distance (m)": measurements["gap_distance_meters"],
+                    "Gap Time (s)": measurements["gap_time_seconds"],
+                    "Required Speed (m/s)": measurements["required_speed_mps"],
+                }
+            )
+
+    st.subheader("Ranked Candidate Scores")
+
+    if candidate_rows:
+
+        scores_df = pd.DataFrame(candidate_rows)
+
+        st.dataframe(
+            scores_df,
+            width='stretch',
+            hide_index=True,
+            column_config={
+                score_label: st.column_config.NumberColumn(
+                    score_label,
+                    format="%.4f",
+                ),
+                "Gap Distance (m)": st.column_config.NumberColumn(
+                    format="%.2f",
+                ),
+                "Gap Time (s)": st.column_config.NumberColumn(
+                    format="%.2f",
+                ),
+                "Required Speed (m/s)": st.column_config.NumberColumn(
+                    format="%.2f",
+                ),
+            },
+        )
+
+    else:
+        st.info("No eligible candidate pairs were generated.")
+
+
+def display_metrics(metrics: dict):
+
+    columns = st.columns(4)
+
+    columns[0].metric(
+        "ROC-AUC",
+        f"{metrics['auc_roc']:.3f}",
+    )
+
+    columns[1].metric(
+        "Gini",
+        f"{metrics['gini']:.3f}",
+    )
+
+    columns[2].metric(
+        "Precision",
+        f"{metrics['precision']:.3f}",
+    )
+
+    columns[3].metric(
+        "Recall",
+        f"{metrics['recall']:.3f}",
+    )
+
+
+st.title("Tracklet Tracker")
+
+st.markdown(
+    """
+    Upload aircraft observation and supporting data to generate
+    tracklet associations using a rule-based baseline and a trained
+    XGBoost classifier.
+    """
 )
 
 
-# =========================================================
-# Load saved model
-# =========================================================
+# API configuration
+with st.sidebar:
 
-@st.cache_resource
-def load_model(model_path: str, modified_time: float):
+    st.header("API Configuration")
 
-    return load_saved_model(model_path)
-
-
-if not MODEL_PATH.is_file():
-
-    st.error(
-        f"Model artifact not found: {MODEL_PATH}"
-    )
-
-    st.stop()
+    api_url = st.text_input(
+        "FastAPI URL",
+        value=API_URL,
+    ).rstrip("/")
 
 
-try:
+# Input files
+st.header("Input Data")
 
-    model = load_model(
-        str(MODEL_PATH),
-        MODEL_PATH.stat().st_mtime,
-    )
+col1, col2 = st.columns(2)
 
-except Exception as exc:
+with col1:
 
-    st.error(f"Unable to load model: {exc}")
-    st.stop()
-
-
-# =========================================================
-# File readers
-# =========================================================
-
-def read_jsonl(
-    uploaded_file,
-    allow_empty: bool = False,
-) -> pd.DataFrame:
-
-    content = uploaded_file.getvalue()
-
-    if not content.strip():
-
-        if allow_empty:
-            return pd.DataFrame()
-
-        raise ValueError(
-            f"{uploaded_file.name} is empty."
-        )
-
-    return pd.read_json(
-        BytesIO(content),
-        lines=True,
-    )
-
-
-# =========================================================
-# Upload interface
-# =========================================================
-
-st.subheader("Upload input data")
-
-upload_mode = st.radio(
-    "Choose input method",
-    [
-        "Upload individual files",
-        "Upload folder",
-    ],
-    horizontal=True,
-)
-
-observations_file = None
-supporting_file = None
-labels_file = None
-
-upload_error = None
-
-
-# ---------------------------------------------------------
-# Method 1: Individual files
-# ---------------------------------------------------------
-
-if upload_mode == "Upload individual files":
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        observations_file = st.file_uploader(
-            "Position reports (observations.jsonl)",
-            type=["jsonl"],
-            key="observations",
-        )
-
-    with col2:
-
-        supporting_file = st.file_uploader(
-            "Supporting records (supporting.jsonl)",
-            type=["jsonl"],
-            key="supporting",
-        )
-
-    labels_file = st.file_uploader(
-        "Ground-truth labels (optional: labels.jsonl)",
+    observations_file = st.file_uploader(
+        "Observations JSONL",
         type=["jsonl"],
-        key="labels",
+        accept_multiple_files=False,
+    )
+
+with col2:
+
+    supporting_file = st.file_uploader(
+        "Supporting JSONL",
+        type=["jsonl"],
+        accept_multiple_files=False,
     )
 
 
-# ---------------------------------------------------------
-# Method 2: Folder upload
-# ---------------------------------------------------------
-
-else:
-
-    uploaded_files = st.file_uploader(
-        "Select the folder containing your input files",
-        accept_multiple_files="directory",
-        key="folder",
-    )
-
-    if uploaded_files:
-
-        files_by_name = {}
-
-        for uploaded_file in uploaded_files:
-
-            # Support relative paths returned by directory upload.
-            filename = Path(
-                uploaded_file.name.replace("\\", "/")
-            ).name
-
-            if filename in files_by_name:
-
-                upload_error = (
-                    f"Duplicate filename found: {filename}"
-                )
-
-                break
-
-            files_by_name[filename] = uploaded_file
-
-        if upload_error is None:
-
-            actual_files = set(files_by_name.keys())
-
-            allowed_file_sets = [
-                REQUIRED_FILES,
-                REQUIRED_FILES | {OPTIONAL_FILE},
-            ]
-
-            if actual_files not in allowed_file_sets:
-
-                upload_error = (
-                    "The selected folder must contain exactly "
-                    "observations.jsonl and supporting.jsonl. "
-                    "labels.jsonl is optional. "
-                    f"Found: {sorted(actual_files)}"
-                )
-
-            else:
-
-                observations_file = files_by_name[
-                    "observations.jsonl"
-                ]
-
-                supporting_file = files_by_name[
-                    "supporting.jsonl"
-                ]
-
-                labels_file = files_by_name.get(
-                    "labels.jsonl"
-                )
+labels_file = st.file_uploader(
+    "Labels JSONL (Optional — evaluation only)",
+    type=["jsonl"],
+    accept_multiple_files=False,
+)
 
 
-if upload_error:
-    st.error(upload_error)
-
-
-# =========================================================
-# Inference configuration
-# =========================================================
-
-st.subheader("Inference configuration")
+# Threshold
+st.header("Inference Configuration")
 
 threshold = st.slider(
-    "Association threshold",
+    "Association confidence threshold",
     min_value=0.0,
     max_value=1.0,
     value=0.90,
     step=0.01,
 )
 
-st.divider()
 
-
-# =========================================================
-# Run inference
-# =========================================================
-
-if st.button(
-    "Run tracklet association",
+run_inference = st.button(
+    "Run Tracklet Association",
     type="primary",
-    use_container_width=True,
-):
+    disabled=(
+        observations_file is None
+        or supporting_file is None
+    ),
+)
 
-    if upload_error:
 
-        st.error(upload_error)
+if run_inference:
 
-    elif observations_file is None or supporting_file is None:
+    files = {
+        "observations_file": (
+            observations_file.name,
+            observations_file.getvalue(),
+            "application/x-ndjson",
+        ),
+        "supporting_file": (
+            supporting_file.name,
+            supporting_file.getvalue(),
+            "application/x-ndjson",
+        ),
+    }
 
-        st.error(
-            "Please upload both observations.jsonl "
-            "and supporting.jsonl."
+    if labels_file is not None:
+
+        files["labels_file"] = (
+            labels_file.name,
+            labels_file.getvalue(),
+            "application/x-ndjson",
         )
 
-    else:
+    data = {
+        "threshold": str(threshold),
+    }
 
-        try:
+    try:
 
-            with st.spinner(
-                "Processing tracklets and generating predictions..."
-            ):
+        with st.spinner("Running tracklet association..."):
 
-                # Read observations.
-                observations_df = read_jsonl(
-                    observations_file
-                )
-
-                # Supporting records may be empty.
-                supporting_df = read_jsonl(
-                    supporting_file,
-                    allow_empty=True,
-                )
-
-                # Labels are optional.
-                labels_df = None
-
-                if labels_file is not None:
-
-                    labels_df = read_jsonl(
-                        labels_file
-                    )
-
-                    required_label_columns = {
-                        "tracklet_id",
-                        "successor_tracklet_id",
-                    }
-
-                    missing = (
-                        required_label_columns
-                        - set(labels_df.columns)
-                    )
-
-                    if missing:
-                        raise ValueError(
-                            "Missing label columns: "
-                            f"{sorted(missing)}"
-                        )
-
-                # Run the existing ML pipeline.
-                results = run_association_inference(
-                    observations_df=observations_df,
-                    supporting_df=supporting_df,
-                    model=model,
-                    threshold=threshold,
-                    labels_df=labels_df,
-                )
-
-            st.success(
-                "Tracklet association completed successfully!"
+            response = requests.post(
+                f"{api_url}/tracklets/associate",
+                files=files,
+                data=data,
+                timeout=(10, 600),
             )
 
-            # -------------------------------------------------
-            # Summary
-            # -------------------------------------------------
+        if response.status_code != 200:
 
-            st.subheader("Inference summary")
+            error_response = response.json()
 
-            col1, col2, col3 = st.columns(3)
-
-            col1.metric(
-                "Tracklets",
-                results["tracklet_count"],
+            error = error_response.get(
+                "error",
+                error_response,
             )
-
-            col2.metric(
-                "Candidate pairs",
-                results["candidate_pair_count"],
-            )
-
-            col3.metric(
-                "Threshold",
-                f'{results["threshold"]:.2f}',
-            )
-
-            # -------------------------------------------------
-            # Association counts
-            # -------------------------------------------------
-
-            col1, col2 = st.columns(2)
-
-            for column, result_key, title in [
-                (col1, "baseline", "Rule-based baseline"),
-                (col2, "learned", "XGBoost model"),
-            ]:
-
-                associated = sum(
-                    item["status"] == "associated"
-                    for item in results[result_key]
-                )
-
-                unresolved = (
-                    len(results[result_key]) - associated
-                )
-
-                with column:
-
-                    st.markdown(f"**{title}**")
-
-                    st.metric(
-                        "Associated tracklets",
-                        associated,
-                    )
-
-                    st.metric(
-                        "Unresolved tracklets",
-                        unresolved,
-                    )
-
-            st.divider()
-
-            # -------------------------------------------------
-            # Optional evaluation
-            # -------------------------------------------------
-
-            if results["evaluation"] is not None:
-
-                st.subheader("Model evaluation")
-
-                evaluation = results["evaluation"]
-
-                if evaluation.get("available") is False:
-
-                    st.info(
-                        evaluation["reason"]
-                    )
-
-                else:
-
-                    evaluation_df = pd.DataFrame([
-                        {
-                            "Model": "Baseline",
-                            **evaluation["baseline"],
-                        },
-                        {
-                            "Model": "XGBoost",
-                            **evaluation["learned"],
-                        },
-                    ])
-
-                    st.dataframe(
-                        evaluation_df,
-                        hide_index=True,
-                        use_container_width=True,
-                    )
-
-            else:
-
-                st.info(
-                    "No labels uploaded. Predictions are available, "
-                    "but ground-truth evaluation was skipped."
-                )
-
-            # -------------------------------------------------
-            # Detailed predictions
-            # -------------------------------------------------
-
-            st.subheader("Association predictions")
-
-            baseline_tab, learned_tab = st.tabs([
-                "Rule-based baseline",
-                "XGBoost model",
-            ])
-
-            with baseline_tab:
-
-                baseline_df = pd.DataFrame(
-                    results["baseline"]
-                )
-
-                st.dataframe(
-                    baseline_df[
-                        [
-                            "tracklet_id",
-                            "status",
-                            "accepted_successor_id",
-                        ]
-                    ],
-                    hide_index=True,
-                    use_container_width=True,
-                )
-
-                with st.expander(
-                    "View ranked baseline candidates"
-                ):
-
-                    st.json(results["baseline"])
-
-            with learned_tab:
-
-                learned_df = pd.DataFrame(
-                    results["learned"]
-                )
-
-                st.dataframe(
-                    learned_df[
-                        [
-                            "tracklet_id",
-                            "status",
-                            "accepted_successor_id",
-                        ]
-                    ],
-                    hide_index=True,
-                    use_container_width=True,
-                )
-
-                with st.expander(
-                    "View ranked XGBoost candidates"
-                ):
-
-                    st.json(results["learned"])
-
-            # -------------------------------------------------
-            # Download results
-            # -------------------------------------------------
-
-            output_json = json.dumps(
-                results,
-                indent=4,
-            )
-
-            st.download_button(
-                label="Download inference results",
-                data=output_json,
-                file_name="tracklet_association_results.json",
-                mime="application/json",
-                use_container_width=True,
-            )
-
-        except Exception as exc:
 
             st.error(
-                f"Inference failed: {exc}"
+                error.get(
+                    "message",
+                    "Unable to complete inference.",
+                )
             )
 
-            st.exception(exc)
+            if error.get("details"):
+                st.json(error["details"])
+
+        else:
+
+            st.session_state["association_result"] = response.json()
+
+            st.success("Tracklet association completed successfully!")
+
+    except requests.exceptions.ConnectionError:
+
+        st.error(
+            "Unable to connect to FastAPI. "
+            "Make sure the backend server is running."
+        )
+
+    except requests.exceptions.Timeout:
+
+        st.error(
+            "The inference request timed out. "
+            "Try a smaller dataset or increase the request timeout."
+        )
+
+    except requests.exceptions.RequestException as exc:
+
+        st.error(f"Request failed: {exc}")
+
+    except ValueError:
+
+        st.error("The API returned an invalid response.")
+
+
+
+if "association_result" in st.session_state:
+
+    result = st.session_state["association_result"]
+
+    st.divider()
+
+    st.header("Association Results")
+
+    st.caption(
+        f"Confidence threshold: {result['threshold']:.2f}"
+    )
+
+    learned = result["learned"]
+    baseline = result["baseline"]
+
+    tab1, tab2 = st.tabs(
+        ["Data-Driven Model", "Rule-Based Baseline"]
+    )
+
+    with tab1:
+
+        st.subheader("XGBoost Predictions")
+
+        associated = sum(
+            record["status"] == "associated"
+            for record in learned
+        )
+
+        unresolved = len(learned) - associated
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric("Total Tracklets", len(learned))
+        col2.metric("Associated", associated)
+        col3.metric("Unresolved", unresolved)
+
+        display_associations(learned, "Model Score")
+
+        st.download_button(
+            "Download Learned Predictions",
+            data=records_to_jsonl(learned),
+            file_name="learned_predictions.jsonl",
+            mime="application/x-ndjson",
+        )
+
+    with tab2:
+
+        st.subheader("Rule-Based Predictions")
+
+        associated = sum(
+            record["status"] == "associated"
+            for record in baseline
+        )
+
+        unresolved = len(baseline) - associated
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric("Total Tracklets", len(baseline))
+        col2.metric("Associated", associated)
+        col3.metric("Unresolved", unresolved)
+
+        display_associations(baseline, "Baseline Score")
+
+        st.download_button(
+            "Download Baseline Predictions",
+            data=records_to_jsonl(baseline),
+            file_name="baseline_predictions.jsonl",
+            mime="application/x-ndjson",
+        )
+
+    # Optional evaluation
+    evaluation = result.get("evaluation")
+
+    if evaluation is not None:
+
+        st.divider()
+
+        st.header("Model Evaluation")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.subheader("Rule-Based Baseline")
+            display_metrics(evaluation["baseline"])
+
+        with col2:
+
+            st.subheader("Data-Driven Model")
+            display_metrics(evaluation["learned"])
+
+            

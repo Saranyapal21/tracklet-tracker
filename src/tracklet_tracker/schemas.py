@@ -1,4 +1,3 @@
-
 from datetime import datetime
 from typing import Any, Literal
 
@@ -8,8 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class APIModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+class InputRecord(APIModel):
+    model_config = ConfigDict(extra="allow")
 
-class PositionReport(APIModel):
+
+class PositionReport(InputRecord):
     observation_id: str = Field(min_length=1)
     tracklet_id: str = Field(min_length=1)
 
@@ -19,11 +21,13 @@ class PositionReport(APIModel):
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
 
+    altitude_ft: float | None = None
+
     source: str = Field(min_length=1)
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class SupportingRecord(APIModel):
+class SupportingRecord(InputRecord):
     record_id: str = Field(min_length=1)
     observation_id: str = Field(min_length=1)
 
@@ -31,11 +35,9 @@ class SupportingRecord(APIModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
 
 
-class AssociationRequest(APIModel):
-    position_reports: list[PositionReport] = Field(min_length=1)
-    supporting_records: list[SupportingRecord] = Field(default_factory=list)
-
-    threshold: float = Field(default=0.90, ge=0.0, le=1.0)
+class LabelRecord(InputRecord):
+    tracklet_id: str = Field(min_length=1)
+    successor_tracklet_id: str | None = None
 
 
 class SupportingMeasurements(APIModel):
@@ -57,12 +59,35 @@ class TrackletAssociation(APIModel):
     ranked_candidates: list[RankedCandidate]
 
 
+class EvaluationMetrics(APIModel):
+    auc_roc: float
+    gini: float
+    precision: float
+    recall: float
+    accuracy: float
+
+    total_events: int
+    event_rate: float
+
+    capture_rate_10: float
+    capture_rate_25: float
+    capture_rate_40: float
+    capture_rate_50: float
+
+
+class EvaluationSummary(APIModel):
+    baseline: EvaluationMetrics
+    learned: EvaluationMetrics
+
+
 class AssociationResponse(APIModel):
     threshold: float
     baseline: list[TrackletAssociation]
     learned: list[TrackletAssociation]
+    evaluation: EvaluationSummary | None = None
 
 
 class HealthResponse(APIModel):
     status: Literal["ok"]
     model_loaded: bool
+    

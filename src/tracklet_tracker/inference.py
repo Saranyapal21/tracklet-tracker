@@ -64,37 +64,104 @@ def run_association_inference(
     threshold: float = 0.90,
     labels_df: pd.DataFrame | None = None,
 ):
+
     observations_df = process_observations(observations_df)
     supporting_df = process_supporting(supporting_df)
 
     master_df = table_join(observations_df, supporting_df)
     aggregated_df = aggregation(master_df)
-    ml_dataset = prepare_features_and_labels(aggregated_df)
+    ml_dataset = prepare_features_and_labels(aggregated_df, labels_df)
 
-    X = ml_dataset.drop(columns=["A_tracklet_id", "B_tracklet_id", "target"], errors="ignore")
+    if ml_dataset.empty:
+        raise ValueError("No valid candidate tracklet pairs were generated.")
 
-    
-    model = load_saved_model(project_root / "models" / "xgb_model.json")
+    X = ml_dataset.drop(
+        columns=["A_tracklet_id", "B_tracklet_id", "target"],
+        errors="ignore",
+    )
+    X = X.select_dtypes(exclude=["object", "string"])
+
     expected_features = model.get_booster().feature_names
-
     if expected_features is not None:
         missing_features = [feature for feature in expected_features if feature not in X.columns]
 
         if missing_features:
             raise ValueError(f"Inference dataset is missing model features: {missing_features}")
-
         X = X.loc[:, expected_features]
+
     else:
         expected_count = getattr(model, "n_features_in_", None)
+
         if expected_count is not None and X.shape[1] != expected_count:
             raise ValueError(
                 f"Model expects {expected_count} features, "
                 f"but inference dataset has {X.shape[1]}."
             )
 
-    y_proba = get_model_probabilities(X, model)
-    print(y_proba)
+    learned_probabilities = get_model_probabilities(X, model)
+    baseline_probabilities = get_baseline_probabilities(ml_dataset)
+    candidate_pairs_df = ml_dataset[
+        [
+            "A_tracklet_id",
+            "B_tracklet_id",
+            "gap_distance_meters",
+            "gap_time_seconds",
+            "required_speed_mps",
+        ]
+    ].copy()
 
+    baseline_df = candidate_pairs_df.copy()
+    baseline_df["probability"] = baseline_probabilities
+
+    learned_df = candidate_pairs_df.copy()
+    learned_df["probability"] = learned_probabilities
+
+
+    def generate_all_outputs(scored_df):
+
+        outputs = []
+        for tracklet_id in aggregated_df["tracklet_id"].unique():
+
+            outputs.append(
+                generate_inference_output(
+                    A_tracklet_id=tracklet_id,
+                    candidate_pairs_df=scored_df,
+                    threshold=threshold,
+                )
+            )
+
+        return outputs
+
+    results = {
+        "baseline": generate_all_outputs(baseline_df),
+        "learned": generate_all_outputs(learned_df),
+        "evaluation": None,
+    }
+
+    if labels_df is not None:
+        y_true = ml_dataset["target"]
+        if y_true.nunique() < 2:
+            raise ValueError(
+                "Evaluation requires both positive and negative candidate pairs."
+            )
+
+        baseline_metrics = compute_evaluation_metrics(y_true, baseline_probabilities, threshold)
+        learned_metrics = compute_evaluation_metrics(y_true, learned_probabilities, threshold)
+
+
+        def to_python_dict(metrics_df):
+            metrics = metrics_df.iloc[0].to_dict()
+            return {
+                key: value.item() if hasattr(value, "item") else value
+                for key, value in metrics.items()
+            }
+
+        results["evaluation"] = {
+            "baseline": to_python_dict(baseline_metrics),
+            "learned": to_python_dict(learned_metrics),
+        }
+
+    return results
 
 
 
