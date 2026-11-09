@@ -1,6 +1,7 @@
 import duckdb
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 
 def process_sql_query(query: str):
@@ -15,8 +16,12 @@ def deduplicating_df(df: pd.DataFrame, subset: str) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def process_observations(observations_path: str) -> pd.DataFrame:
-    observations_df = pd.read_json(observations_path, lines=True)
+def process_observations(observation_source: str | Path | pd.DataFrame) -> pd.DataFrame:
+    if isinstance(observation_source, pd.DataFrame):
+        observations_df = observation_source.copy()
+    else:
+        observations_df = pd.read_json(observation_source, lines=True)
+
     observations_df = deduplicating_df(observations_df, "observation_id")
 
     #   Removing all rows with invalid latitude and longitude
@@ -47,8 +52,12 @@ def process_observations(observations_path: str) -> pd.DataFrame:
     return observations_df
 
 
-def process_supporting(supporting_path: str) -> pd.DataFrame:
-    supporting_df = pd.read_json(supporting_path, lines=True)
+def process_supporting(supporting_source: str | Path | pd.DataFrame) -> pd.DataFrame:
+    if isinstance(supporting_source, pd.DataFrame):
+        supporting_df = supporting_source.copy()
+    else:
+        supporting_df = pd.read_json(supporting_source, lines=True)
+    
     supporting_df = deduplicating_df(supporting_df, "record_id")
 
     if "received_at" in supporting_df.columns:
@@ -66,14 +75,15 @@ def process_supporting(supporting_path: str) -> pd.DataFrame:
 
 
 def read_scenario(
-    observations_path: str, labels_path: str, supporting_path: str, snapshot_path: str
+    observations_path: str, 
+    labels_path: str, 
+    supporting_path: str
 ):
     observations_df = process_observations(observations_path)
     labels_df = pd.read_json(labels_path, lines=True)
     supporting_df = process_supporting(supporting_path)
-    snapshot_df = pd.read_json(snapshot_path)
 
-    return observations_df, labels_df, supporting_df, snapshot_df
+    return observations_df, labels_df, supporting_df
 
 
 def table_join(observations_df, supporting_df):

@@ -1,14 +1,24 @@
 import json
-import numpy as np
-import pandas as pd
 from pathlib import Path
 
-from tracklet_tracker.__main__ import (
+import numpy as np
+import pandas as pd
+
+from tracklet_tracker.helper_functions import (
     build_train_test_eval_set,
-    build_model,
     get_model_probabilities,
-    load_saved_model
+    load_saved_model,
 )
+from tracklet_tracker.process_scenario import (
+    process_observations,
+    process_supporting,
+    table_join,
+    aggregation,
+)
+from tracklet_tracker.feature_preparation import prepare_features_and_labels
+from tracklet_tracker.rule_based_scorer import get_baseline_probabilities
+from tracklet_tracker.evaluate import compute_evaluation_metrics
+
 
 
 def generate_inference_output(A_tracklet_id: str, candidate_pairs_df: pd.DataFrame, threshold: float = 0.90) -> dict:
@@ -46,6 +56,48 @@ def generate_inference_output(A_tracklet_id: str, candidate_pairs_df: pd.DataFra
     return output
 
 
+
+def run_association_inference(
+    observations_df: pd.DataFrame,
+    supporting_df: pd.DataFrame,
+    model,
+    threshold: float = 0.90,
+    labels_df: pd.DataFrame | None = None,
+):
+    observations_df = process_observations(observations_df)
+    supporting_df = process_supporting(supporting_df)
+
+    master_df = table_join(observations_df, supporting_df)
+    aggregated_df = aggregation(master_df)
+    ml_dataset = prepare_features_and_labels(aggregated_df)
+
+    X = ml_dataset.drop(columns=["A_tracklet_id", "B_tracklet_id", "target"], errors="ignore")
+
+    
+    model = load_saved_model(project_root / "models" / "xgb_model.json")
+    expected_features = model.get_booster().feature_names
+
+    if expected_features is not None:
+        missing_features = [feature for feature in expected_features if feature not in X.columns]
+
+        if missing_features:
+            raise ValueError(f"Inference dataset is missing model features: {missing_features}")
+
+        X = X.loc[:, expected_features]
+    else:
+        expected_count = getattr(model, "n_features_in_", None)
+        if expected_count is not None and X.shape[1] != expected_count:
+            raise ValueError(
+                f"Model expects {expected_count} features, "
+                f"but inference dataset has {X.shape[1]}."
+            )
+
+    y_proba = get_model_probabilities(X, model)
+    print(y_proba)
+
+
+
+
 def save_test_predictions(X_test, y_test, y_proba, output_path, threshold=0.90):
     results_df = X_test.copy()
     
@@ -79,6 +131,7 @@ def save_test_predictions(X_test, y_test, y_proba, output_path, threshold=0.90):
             
     print(f"Successfully saved test predictions to {output_path}")
     return final_outputs
+
 
 
 if __name__ == "__main__":

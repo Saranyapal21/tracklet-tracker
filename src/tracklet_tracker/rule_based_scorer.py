@@ -8,7 +8,9 @@ def get_baseline_probabilities(X: pd.DataFrame) -> pd.Series:
     
     # How closely does the required gap speed match the aircraft's reported speed?
     # If observed speed is missing (NaN), assume a standard cruising speed of 200 m/s.
-    speed_diff = X['speed_diff_A_observ'].fillna(abs(X['required_speed_mps'] - 200.0))
+    speed_diff = X.get("speed_diff_A_observ", pd.Series(np.nan, index=X.index)).fillna(
+            abs(X["required_speed_mps"] - 200.0)
+    )
     
     # Convert speed difference into a score from 0.0 to 1.0 using exponential decay.
     base_score = np.exp(-speed_diff / 50.0)

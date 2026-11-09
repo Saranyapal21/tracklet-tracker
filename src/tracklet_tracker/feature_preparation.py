@@ -42,7 +42,8 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
 
 
 def prepare_features_and_labels(
-    tracklets_summary: pd.DataFrame, labels_df: pd.DataFrame
+    tracklets_summary: pd.DataFrame, 
+    labels_df: pd.DataFrame | None = None
 ) -> pd.DataFrame:
     """
     Generates all candidate pairs (A -> B), computes physical relationship features,
@@ -101,8 +102,23 @@ def prepare_features_and_labels(
             pairs["A_supporting_spd"] - pairs["B_supporting_spd"]
         )
 
-    # Attach the Ground Truth Labels (The Target Variable)
-    # Rename labels to match pair structure for a clean left join
+
+
+    # Drop core timestamps features (we have already computed derived features before)
+    cols_to_drop = [
+        "A_start_time",
+        "A_end_time",
+        "B_start_time",
+        "B_end_time",
+    ]
+
+    pairs = pairs.drop(columns=cols_to_drop, errors="ignore")
+
+    # Labels are unnecessary during inference.
+    if labels_df is None:
+        return pairs
+
+    # Attach ground-truth labels during training/evaluation.
     truth_df = labels_df[["tracklet_id", "successor_tracklet_id"]].copy()
     truth_df = truth_df.rename(
         columns={
@@ -110,31 +126,26 @@ def prepare_features_and_labels(
             "successor_tracklet_id": "B_tracklet_id",
         }
     )
-
-    # Add a column so we know which pairs matched the truth
+    
     truth_df["target"] = 1
-
-    # Left join the truth onto our pairs
     final_dataset = pd.merge(
-        pairs, truth_df, on=["A_tracklet_id", "B_tracklet_id"], how="left"
+        pairs,
+        truth_df,
+        on=["A_tracklet_id", "B_tracklet_id"],
+        how="left",
     )
 
-    # Any pair that wasn't in the truth table gets a 0 (False link)
-    final_dataset["target"] = final_dataset["target"].fillna(0).astype(int)
-
-    # Clean up the dataframe for the ML model
-    # Drop timestamps as ML models can't ingest raw datetimes directly
-    cols_to_drop = ["A_start_time", "A_end_time", "B_start_time", "B_end_time"]
-    final_dataset = final_dataset.drop(columns=cols_to_drop, errors="ignore")
-
+    final_dataset["target"] = (
+        final_dataset["target"].fillna(0).astype(int)
+    )
     return final_dataset
 
 
 def build_all_features(
-    observations_path: str, labels_path: str, supporting_path: str, snapshot_path: str
+    observations_path: str, labels_path: str, supporting_path: str
 ):
-    observations_df, labels_df, supporting_df, snapshot_df = read_scenario(
-        observations_path, labels_path, supporting_path, snapshot_path
+    observations_df, labels_df, supporting_df = read_scenario(
+        observations_path, labels_path, supporting_path
     )
 
     master_df = table_join(observations_df, supporting_df)

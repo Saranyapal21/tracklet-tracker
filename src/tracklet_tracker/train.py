@@ -6,6 +6,7 @@ from pathlib import Path
 import xgboost as xgb
 
 
+
 def build_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -36,5 +37,4 @@ def build_model(
     return model
 
 
-def get_model_probabilities(X: pd.DataFrame, model: xgb.XGBClassifier):
-    return model.predict_proba(X)[:, 1]
+
