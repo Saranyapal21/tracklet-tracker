@@ -60,7 +60,10 @@ outperforming the rule-based baseline.
 
 ## Test Data Performance Comparison:
 
-Total no. of rows (test data points): 3,870
+- Total no. of rows (test data points): 3,870
+- Total no. of tracklets: 339
+- Associated tracklets: 159
+- Unresolved tracklets: 180
 
 **Confusion Matrix (Threshold = 0.9):**
 
