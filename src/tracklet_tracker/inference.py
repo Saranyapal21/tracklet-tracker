@@ -6,7 +6,8 @@ from pathlib import Path
 from tracklet_tracker.__main__ import (
     build_train_test_eval_set,
     build_model,
-    get_model_probabilities
+    get_model_probabilities,
+    load_saved_model
 )
 
 
@@ -92,7 +93,10 @@ if __name__ == "__main__":
         build_train_test_eval_set(train_path, test_path, val_path)
     )
 
-    model = build_model(X_train, y_train, X_val, y_val, project_root / "models")
+    #   [Optional] If you want to again train the model before inference
+    # model = build_model(X_train, y_train, X_val, y_val, project_root / "models")
+
+    model = load_saved_model(project_root / "models" / "xgb_model.json")
     y_proba = get_model_probabilities(X_test, model)
     
     output_file = project_root / "outputs" / "test_inference_predictions.jsonl"

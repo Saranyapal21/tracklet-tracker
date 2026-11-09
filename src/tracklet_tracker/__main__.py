@@ -59,8 +59,7 @@ def build_train_test_eval_set(train_path: str, test_path: str, val_path: str):
     )
 
 
-def load_saved_model(save_path: str) -> xgb.XGBClassifier:
-    pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+def load_saved_model(save_path: str, pos_weight: float = 10.665689) -> xgb.XGBClassifier:
 
     model = xgb.XGBClassifier(
         scale_pos_weight=pos_weight,
