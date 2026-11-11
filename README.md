@@ -8,7 +8,7 @@ outperforming the rule-based baseline.
 
 ## Set up the Project Locally:
 
-**Prerequisite:** This project requires uv, a Python package and project manager, to install dependencies and run the application. All project dependencies are specified in pyproject.toml, so there is no need to install them manually. The project follows a package-based structure, making it straightforward to set up and run. Simply follow the steps below:
+**Prerequisite:** This project requires [uv](https://docs.astral.sh/uv/), a Python package and project manager, to install dependencies and run the application. All project dependencies are specified in pyproject.toml, so there is no need to install them manually. The project follows a package-based structure, making it straightforward to set up and run. Simply follow the steps below:
 
 1. Clone the repository
    ```bash
@@ -45,6 +45,32 @@ outperforming the rule-based baseline.
    ```bash
     python -m tracklet_tracker.inference
     ```
+
+
+## Steps to run the application locally:
+
+The project also includes a frontend as well as a backend using FastAPI. This allows users to upload telemetry observations, supporting data, and optional ground-truth labels and obtain aircraft trajectory predictions.
+
+The application follows a client-server architecture:
+
+- **Streamlit (app.py)**: Provides the interactive frontend for file uploads, threshold configuration, and displaying prediction results.
+- **FastAPI (tracklet_tracker/api.py)**: Exposes REST endpoints, handles incoming requests, validates uploaded files, and manages the inference model.
+
+Below are the steps to run the application locally:
+
+1. Open a terminal at the project root and execute the following. Keep this terminal running while using the application.
+   ```bash
+   uv run uvicorn tracklet_tracker.api:app --reload --host 127.0.0.1 --port 8000
+   ```
+
+2. Open a second terminal at the project root and execute:
+   ```bash
+   streamlit run app.py
+   ```
+
+3. Once both the services are running, you will be able to upload the `observations.jsonl` and `supporting.jsonl` to obtain model predictions.
+
+**Note**: The FastAPI backend must be running before submitting requests through Streamlit. The application communicates with the backend through HTTP requests.
 
 
 ## Approach:
